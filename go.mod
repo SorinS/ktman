@@ -6,7 +6,7 @@ require (
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.4
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/go-krb5/krb5 v0.0.0
+	github.com/go-krb5/krb5 v0.2.1
 	github.com/go-krb5/x v0.3.2
 	golang.org/x/term v0.42.0
 )
@@ -39,4 +39,4 @@ require (
 	golang.org/x/text v0.36.0 // indirect
 )
 
-replace github.com/go-krb5/krb5 => ../krb5.git
+replace github.com/go-krb5/krb5 => github.com/SorinS/krb5 v0.2.1

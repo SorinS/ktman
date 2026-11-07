@@ -5,7 +5,9 @@ package kt
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -152,8 +154,37 @@ func ResolveConfigPath(flagPath string) string {
 }
 
 // LoadConfig loads a krb5.conf, resolving the path as ResolveConfigPath does.
+//
+// A krb5.conf is optional. When none is named (no -c and no $KRB5_CONFIG) and
+// the default /etc/krb5.conf is absent, LoadConfig returns DNSConfig, which
+// discovers each realm's KDC from DNS — so a login works from a realm name
+// alone, with no configuration file. A config named explicitly must exist and
+// load; so must a default /etc/krb5.conf that is present but will not load.
 func LoadConfig(flagPath string) (*config.Config, error) {
-	return config.Load(ResolveConfigPath(flagPath))
+	path := ResolveConfigPath(flagPath)
+	explicit := flagPath != "" || os.Getenv("KRB5_CONFIG") != ""
+
+	if _, err := os.Stat(path); err != nil {
+		if !explicit && errors.Is(err, fs.ErrNotExist) {
+			return DNSConfig(), nil
+		}
+
+		return nil, fmt.Errorf("krb5 config %q: %w", path, err)
+	}
+
+	return config.Load(path)
+}
+
+// DNSConfig is the configuration ktman uses when there is no krb5.conf: each
+// realm's KDCs are found from DNS SRV records (dns_lookup_kdc), and a realm is
+// found from a host's domain the same way (dns_lookup_realm). It lets login and
+// service-ticket requests work from a realm name with no configuration file.
+func DNSConfig() *config.Config {
+	c := config.New()
+	c.LibDefaults.DNSLookupKDC = true
+	c.LibDefaults.DNSLookupRealm = true
+
+	return c
 }
 
 // DefaultPrincipal returns the principal name (components joined, no realm) and
