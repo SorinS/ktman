@@ -1,0 +1,20 @@
+# Build output
+/ktman
+/dist/
+*.exe
+
+# Keytabs and credential caches should never be committed
+*.keytab
+*.cc
+*.ccache
+krb5cc_*
+
+# Go
+*.test
+*.out
+/vendor/
+
+# Editor / OS
+.DS_Store
+.idea/
+*.swp
