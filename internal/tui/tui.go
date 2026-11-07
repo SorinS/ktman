@@ -656,8 +656,15 @@ func (m *model) fetchKVNOFromAD() tea.Cmd {
 	addr, dc, cfg := m.ldapAddr, m.dcHost, m.cfg
 
 	return func() tea.Msg {
-		kvno, err := kt.GetKVNOFromAD(name, realm, password, cfg, addr, dc)
-		return kvnoMsg{kvno: kvno, err: err}
+		return safeMsg(
+			func() tea.Msg {
+				kvno, err := kt.GetKVNOFromAD(name, realm, password, cfg, addr, dc)
+				return kvnoMsg{kvno: kvno, err: err}
+			},
+			func(r any) tea.Msg {
+				return kvnoMsg{err: fmt.Errorf("Get KVNO from AD crashed (recovered panic): %v", r)}
+			},
+		)
 	}
 }
 
@@ -802,8 +809,15 @@ func (m *model) loginSelected() tea.Cmd {
 	cfg := m.cfg
 
 	return func() tea.Msg {
-		cl, tgt, err := kt.Login(ktab, principal, realm, cfg)
-		return tgtMsg{cl: cl, tgt: tgt, err: err}
+		return safeMsg(
+			func() tea.Msg {
+				cl, tgt, err := kt.Login(ktab, principal, realm, cfg)
+				return tgtMsg{cl: cl, tgt: tgt, err: err}
+			},
+			func(r any) tea.Msg {
+				return tgtMsg{err: fmt.Errorf("login crashed (recovered panic): %v", r)}
+			},
+		)
 	}
 }
 
@@ -853,8 +867,15 @@ func (m *model) getServiceTicket() tea.Cmd {
 	cl := m.cl
 
 	return func() tea.Msg {
-		svc, err := kt.ServiceTicket(cl, spn)
-		return svcMsg{svc: svc, err: err}
+		return safeMsg(
+			func() tea.Msg {
+				svc, err := kt.ServiceTicket(cl, spn)
+				return svcMsg{svc: svc, err: err}
+			},
+			func(r any) tea.Msg {
+				return svcMsg{err: fmt.Errorf("service ticket crashed (recovered panic): %v", r)}
+			},
+		)
 	}
 }
 

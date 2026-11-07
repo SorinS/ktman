@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +95,38 @@ func TestTGTMessageUpdatesState(t *testing.T) {
 
 	if !strings.Contains(m.status, "TGT OK") {
 		t.Fatalf("status should report TGT OK, got %q", m.status)
+	}
+}
+
+// A panic inside a command goroutine is recovered and delivered as an error
+// message, so a library crash shows in the status line instead of killing the
+// whole UI (which would lose unsaved edits).
+func TestSafeMsgRecoversPanic(t *testing.T) {
+	got := safeMsg(
+		func() tea.Msg { panic("boom") },
+		func(r any) tea.Msg { return tgtMsg{err: fmt.Errorf("recovered: %v", r)} },
+	)
+
+	tm, ok := got.(tgtMsg)
+	if !ok {
+		t.Fatalf("want tgtMsg from a recovered panic, got %T", got)
+	}
+
+	if tm.err == nil || !strings.Contains(tm.err.Error(), "boom") {
+		t.Fatalf("recovered error should name the panic, got %v", tm.err)
+	}
+
+	// And the recovered message drives the Update loop to a clean error state.
+	m := newModel(testKeytab(t), "web.keytab", "", "", "/nonexistent/krb5.conf", "", "")
+	m.busy = true
+	m.Update(tm)
+
+	if m.busy {
+		t.Fatal("busy should clear after a recovered-panic tgtMsg")
+	}
+
+	if !m.isErr || !strings.Contains(m.status, "boom") {
+		t.Fatalf("status should report the recovered panic, got isErr=%v %q", m.isErr, m.status)
 	}
 }
 
