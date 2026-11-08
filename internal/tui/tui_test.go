@@ -7,8 +7,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/go-krb5/krb5/iana/etypeID"
-	"github.com/go-krb5/krb5/keytab"
+	"github.com/SorinS/krb5/iana/etypeID"
+	"github.com/SorinS/krb5/keytab"
 
 	"sorins/ktman/internal/kt"
 )

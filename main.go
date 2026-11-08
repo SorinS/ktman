@@ -1,7 +1,7 @@
 // Command ktman is a Kerberos keytab tool: create a keytab, list it, get a TGT
 // from it, and get a service ticket, on the command line or in a terminal UI.
 //
-// It is built on github.com/go-krb5/krb5 and is pure Go (no cgo). It opens no
+// It is built on github.com/SorinS/krb5 and is pure Go (no cgo). It opens no
 // network listeners; any traffic goes to the KDC named in the krb5.conf given.
 //
 //	ktman -k /etc/krb5.keytab -l
@@ -21,7 +21,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/go-krb5/krb5/keytab"
+	"github.com/SorinS/krb5/keytab"
 
 	"sorins/ktman/internal/kt"
 	"sorins/ktman/internal/tui"

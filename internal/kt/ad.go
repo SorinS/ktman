@@ -5,10 +5,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/go-krb5/krb5/client"
-	"github.com/go-krb5/krb5/config"
-	"github.com/go-krb5/krb5/gsskrb5"
-	"github.com/go-krb5/krb5/ldap"
+	"github.com/SorinS/krb5/client"
+	"github.com/SorinS/krb5/config"
+	"github.com/SorinS/krb5/gsskrb5"
+	"github.com/SorinS/krb5/ldap"
 )
 
 // GetKVNOFromAD looks up a principal's key version number in Active Directory

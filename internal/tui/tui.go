@@ -14,9 +14,9 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/go-krb5/krb5/client"
-	"github.com/go-krb5/krb5/config"
-	"github.com/go-krb5/krb5/keytab"
+	"github.com/SorinS/krb5/client"
+	"github.com/SorinS/krb5/config"
+	"github.com/SorinS/krb5/keytab"
 
 	"sorins/ktman/internal/kt"
 )
