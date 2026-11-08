@@ -23,7 +23,7 @@ import (
 func GetKVNOFromAD(principal, realm, password string, cfg *config.Config, ldapAddr, dcHost string) (uint32, error) {
 	name, realm := NormalizePrincipal(principal, realm)
 
-	cl := client.NewWithPassword(name, realm, password, cfg)
+	cl := client.NewWithPassword(name, realm, password, cfg, clientSettings()...)
 	if err := cl.Login(); err != nil {
 		return 0, fmt.Errorf("login as %s@%s: %w", name, realm, err)
 	}

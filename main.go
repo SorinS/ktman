@@ -12,8 +12,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -29,7 +31,7 @@ import (
 
 func main() {
 	var (
-		ktPath    = flag.String("k", "", "path to the keytab file")
+		ktPath    = flag.String("k", "", "path to the keytab file (default: $KRB5_KTNAME)")
 		list      = flag.Bool("l", false, "list the keytab's entries and exit")
 		ui        = flag.Bool("ui", false, "start the terminal UI")
 		newKt     = flag.Bool("n", false, "create (or append to) the keytab: add an entry for -p@-r")
@@ -37,6 +39,10 @@ func main() {
 		realm     = flag.String("r", "", "realm (default on login: the chosen entry's realm, else default_realm)")
 		cfgPath   = flag.String("c", "", "krb5.conf path (default: $KRB5_CONFIG, else "+kt.DefaultConfigPath+")")
 		spn       = flag.String("spn", "", "service to get a ticket for, format SERVICE/fqdn (implies a login)")
+		negotiate = flag.Bool("negotiate", false, "with -spn: also print an HTTP Authorization: Negotiate header for it")
+		decode    = flag.Bool("decode", false, "with -spn: show the ticket's fields; its encrypted part and PAC too if a keytab holds the service's key")
+		svcKtPath = flag.String("skt", "", "with -decode: a keytab holding the service's key, if -k does not")
+		showKeys  = flag.Bool("print_key", false, "with -decode: also print the session key's bytes (as klist -K)")
 		salt      = flag.String("salt", "", "create: explicit salt (AD salts differ from the default); empty for the default")
 		etypes    = flag.String("e", "", "create: encryption type (default aes256-cts-hmac-sha1-96); one per entry")
 		kvno      = flag.Uint("kvno", 1, "create: the key version")
@@ -53,6 +59,25 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
+	var err error
+	if *ktPath, err = kt.ResolveKeytabPath(*ktPath); err != nil {
+		fatal("%v", err)
+	}
+
+	traceFile, err := kt.OpenTrace()
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	if traceFile != nil {
+		defer traceFile.Close()
+
+		// The TUI owns the terminal: a trace written to it would garble it.
+		if *ui && onTerminal(traceFile) {
+			fatal("$%s is the terminal, which -ui draws on: give it a file", kt.EnvTrace)
+		}
+	}
+
 	// The TUI does not require a keytab: with none it opens a create-or-open
 	// screen. This must come before the -k requirement check below.
 	if *ui {
@@ -64,7 +89,7 @@ func main() {
 	}
 
 	if *ktPath == "" {
-		fmt.Fprintln(os.Stderr, "ktman: a keytab is required (-k PATH), or use -ui")
+		fmt.Fprintln(os.Stderr, "ktman: a keytab is required (-k PATH or $KRB5_KTNAME), or use -ui")
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -78,7 +103,9 @@ func main() {
 	}
 
 	ktab, err := kt.Load(*ktPath)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
+		fatal("keytab %q does not exist: create it with -n -p PRINCIPAL -r REALM, or in -ui", *ktPath)
+	} else if err != nil {
 		fatal("could not load keytab %q: %v", *ktPath, err)
 	}
 
@@ -88,7 +115,20 @@ func main() {
 		return
 	}
 
-	if err := runLogin(ktab, *principal, *realm, *cfgPath, *spn); err != nil {
+	if (*negotiate || *decode) && *spn == "" {
+		fatal("-negotiate and -decode need -spn")
+	}
+
+	var svcKt *keytab.Keytab
+	if *svcKtPath != "" {
+		if svcKt, err = kt.Load(*svcKtPath); err != nil {
+			fatal("could not load the service keytab %q: %v", *svcKtPath, err)
+		}
+	}
+
+	dec := decodeOpts{on: *decode, showKeys: *showKeys, svcKt: svcKt}
+
+	if err := runLogin(ktab, *principal, *realm, *cfgPath, *spn, *negotiate, dec); err != nil {
 		fatal("%v", err)
 	}
 }
@@ -198,7 +238,17 @@ func listKeytab(ktab *keytab.Keytab) {
 }
 
 // runLogin gets a TGT from the keytab and, if an SPN is given, a service ticket.
-func runLogin(ktab *keytab.Keytab, principal, realm, cfgPath, spn string) error {
+// decodeOpts are -decode's: whether to, whether to show the session key, and a
+// keytab holding the service's key besides -k's.
+type decodeOpts struct {
+	on       bool
+	showKeys bool
+	svcKt    *keytab.Keytab
+}
+
+// With dec.on, it shows the ticket decoded; with negotiate, it also prints an
+// HTTP Negotiate header for the service, last and on a line of its own, to copy.
+func runLogin(ktab *keytab.Keytab, principal, realm, cfgPath, spn string, negotiate bool, dec decodeOpts) error {
 	cfg, err := kt.LoadConfig(cfgPath)
 	if err != nil {
 		return fmt.Errorf("could not load krb5.conf (%s): %w", kt.ResolveConfigPath(cfgPath), err)
@@ -246,6 +296,23 @@ func runLogin(ktab *keytab.Keytab, principal, realm, cfgPath, spn string) error 
 		fmt.Printf("  flags: %s\n", strings.Join(svc.Flags, " "))
 	}
 
+	if dec.on {
+		fmt.Println()
+		kt.DecodeTicket(os.Stdout, svc, dec.showKeys, dec.svcKt, ktab)
+	}
+
+	if !negotiate {
+		return nil
+	}
+
+	token, err := kt.NegotiateToken(cl, spn)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("\nNegotiate header (one use, within about 5 minutes):\n")
+	fmt.Printf("Authorization: Negotiate %s\n", token)
+
 	return nil
 }
 
@@ -271,27 +338,57 @@ func fatal(format string, a ...any) {
 	os.Exit(1)
 }
 
+// onTerminal is whether f is the terminal ktman's stdout or stderr is.
+func onTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+
+	for _, std := range []*os.File{os.Stdout, os.Stderr} {
+		if si, err := std.Stat(); err == nil && os.SameFile(fi, si) && si.Mode()&os.ModeCharDevice != 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `ktman - Kerberos keytab tool
 
 Usage:
   ktman -k PATH [-l]
   ktman -n -k PATH -p PRINCIPAL -r REALM [-e ENCTYPES] [-kvno N] [-salt SALT]
-  ktman -k PATH -p PRINCIPAL [-r REALM] [-c krb5.conf] [-spn SERVICE/fqdn]
+  ktman -k PATH -p PRINCIPAL [-r REALM] [-c krb5.conf] [-spn SERVICE/fqdn [-negotiate] [-decode [-skt PATH] [-print_key]]]
   ktman -ui [-k PATH]
 
 Flags:
-  -k, -keytab PATH      keytab file (required unless -ui)
+  -k, -keytab PATH      keytab file (default: $KRB5_KTNAME; required unless -ui)
   -l                    list the keytab's entries and exit (no KDC needed)
   -n, -new              create/append: add an entry for -p@-r to the keytab
-  -ui                   start the terminal UI (no -k needed; opens create-or-open)
+  -ui                   start the terminal UI (no -k needed; a -k that does not
+                        exist yet starts a new keytab, created on save)
   -p, -principal NAME   principal (create: required; login: default first entry)
   -r, -realm REALM      realm (create: required; login: default entry's realm)
-  -c, -config PATH      krb5.conf (default: $KRB5_CONFIG, else /etc/krb5.conf)
+  -c, -config PATH      krb5.conf (default: $KRB5_CONFIG, else /etc/krb5.conf;
+                        none there: KDCs from DNS)
   -spn SERVICE/fqdn     get a service ticket for this SPN after login
+  -negotiate            with -spn: also print an "Authorization: Negotiate"
+                        header for it (one use, within about 5 minutes)
+  -decode               with -spn: show the ticket field by field; its encrypted
+                        part and PAC too when -skt or -k holds the service's key
+  -skt PATH             with -decode: keytab with the service's key
+  -print_key            with -decode: also print the session key's bytes
   -e ENCTYPES           create: comma-separated enctypes (default aes256-cts,aes128-cts)
   -kvno N               create: key version (default 1)
   -salt SALT            create: explicit salt (empty for the default)
+
+Environment:
+  KRB5_CONFIG           krb5.conf, when no -c (a list: the first that exists)
+  KRB5_KTNAME           keytab, when no -k (PATH or FILE:PATH)
+  KRB5_TRACE            a file to append the Kerberos exchanges' debug log to
+                        (e.g. /dev/stderr; with -ui, not the terminal)
 
 The create password is read from a no-echo prompt, or from stdin if piped.
 It is never taken from a flag.
@@ -301,6 +398,7 @@ Examples:
   echo s3cret | ktman -n -k svc.keytab -p HTTP/svc.a.test -r A.TEST
   ktman -n -k svc.keytab -p host/svc.a.test -r A.TEST -e aes256-cts,rc4-hmac -kvno 3
   ktman -k svc.keytab -p HTTP/svc.a.test -r A.TEST -c krb5.conf -spn host/svc.a.test
+  curl -H "$(ktman -k u.keytab -p alice -r A.TEST -spn HTTP/web.a.test -negotiate | tail -1)" https://web.a.test/
   ktman -ui
 `)
 }

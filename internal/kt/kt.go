@@ -19,6 +19,7 @@ import (
 	"github.com/SorinS/krb5/iana/etypeID"
 	"github.com/SorinS/krb5/iana/flags"
 	"github.com/SorinS/krb5/keytab"
+	"github.com/SorinS/krb5/messages"
 	"github.com/SorinS/krb5/types"
 )
 
@@ -139,14 +140,14 @@ func Load(path string) (*keytab.Keytab, error) {
 }
 
 // ResolveConfigPath picks the krb5.conf path: the flag if given, else
-// $KRB5_CONFIG, else DefaultConfigPath. config.Load does not do this fallback
-// itself (it fails on an empty path), so we do it here.
+// $KRB5_CONFIG's (configFromEnv), else DefaultConfigPath. config.Load does not
+// do this fallback itself (it fails on an empty path), so we do it here.
 func ResolveConfigPath(flagPath string) string {
 	if flagPath != "" {
 		return flagPath
 	}
 
-	if env := os.Getenv("KRB5_CONFIG"); env != "" {
+	if env := configFromEnv(); env != "" {
 		return env
 	}
 
@@ -162,7 +163,7 @@ func ResolveConfigPath(flagPath string) string {
 // load; so must a default /etc/krb5.conf that is present but will not load.
 func LoadConfig(flagPath string) (*config.Config, error) {
 	path := ResolveConfigPath(flagPath)
-	explicit := flagPath != "" || os.Getenv("KRB5_CONFIG") != ""
+	explicit := flagPath != "" || configFromEnv() != ""
 
 	if _, err := os.Stat(path); err != nil {
 		if !explicit && errors.Is(err, fs.ErrNotExist) {
@@ -240,7 +241,7 @@ func Login(kt *keytab.Keytab, principal, realm string, cfg *config.Config) (*cli
 		realm = RealmForPrincipal(kt, principal)
 	}
 
-	cl := client.NewWithKeytab(principal, realm, kt, cfg)
+	cl := client.NewWithKeytab(principal, realm, kt, cfg, clientSettings()...)
 
 	if err := cl.Login(); err != nil {
 		cl.Destroy()
@@ -294,6 +295,9 @@ type SvcInfo struct {
 	EndTime        time.Time
 	RenewTill      time.Time
 	Flags          []string
+
+	Ticket     messages.Ticket     // the ticket itself, for DecodeTicket
+	SessionKey types.EncryptionKey // never shown; DecodeTicket compares against it
 }
 
 // ServiceTicket gets a ticket for the SPN (format SERVICE/fqdn) using the
@@ -311,6 +315,8 @@ func ServiceTicket(cl *client.Client, spn string) (SvcInfo, error) {
 		ETypeName:      EtypeName(tkt.EncPart.EType),
 		KVNO:           tkt.EncPart.KVNO,
 		SessionKeyType: key.KeyType,
+		Ticket:         tkt,
+		SessionKey:     key,
 	}
 
 	// Flags and times come from the credential cache: the ticket itself is

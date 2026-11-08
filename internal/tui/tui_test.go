@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -163,5 +165,45 @@ func TestCloneAndDelete(t *testing.T) {
 
 	if len(m.rows) != 2 {
 		t.Fatalf("after delete want 2 rows, got %d", len(m.rows))
+	}
+}
+
+// Opening a path that does not exist yet starts an empty keytab bound to it,
+// and saving creates the file there; a file that will not parse is refused.
+func TestOpenMissingKeytabCreatesOnSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "new.keytab")
+
+	m := newModel(nil, "", "", "", "/nonexistent/krb5.conf", "", "")
+	m.promptKind = promptOpen
+	m.applyPrompt(path)
+
+	if m.isErr || m.ktPath != path || len(m.ktab.Entries) != 0 {
+		t.Fatalf("open of a missing path: isErr=%v ktPath=%q entries=%d status=%q",
+			m.isErr, m.ktPath, len(m.ktab.Entries), m.status)
+	}
+
+	m.ktab = testKeytab(t)
+	m.save()
+
+	if m.isErr {
+		t.Fatalf("save failed: %s", m.status)
+	}
+
+	k, err := kt.Load(path)
+	if err != nil || len(k.Entries) != 2 {
+		t.Fatalf("saved keytab: err=%v", err)
+	}
+
+	bad := filepath.Join(dir, "bad.keytab")
+	if err := os.WriteFile(bad, []byte("not a keytab"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m.promptKind = promptOpen
+	m.applyPrompt(bad)
+
+	if !m.isErr || m.ktPath != path {
+		t.Fatalf("open of a bad keytab: isErr=%v ktPath=%q", m.isErr, m.ktPath)
 	}
 }

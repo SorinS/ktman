@@ -6,7 +6,9 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +120,12 @@ type tgtMsg struct {
 	err error
 }
 
+// negMsg carries a Negotiate token made for the test screen's service.
+type negMsg struct {
+	token string
+	err   error
+}
+
 type svcMsg struct {
 	svc kt.SvcInfo
 	err error
@@ -128,8 +136,10 @@ type kvnoMsg struct {
 	err  error
 }
 
-// Run starts the TUI. ktPath may be empty; a given path is loaded, and one that
-// will not open starts an empty keytab with the reason shown.
+// Run starts the TUI. ktPath may be empty; a given path is loaded. One that does
+// not exist yet starts an empty keytab that ctrl+s creates there; one that will
+// not open starts an empty, unnamed keytab with the reason shown (it is not
+// written over).
 func Run(ktPath, principal, realm, cfgPath, ldapAddr, dcHost string) error {
 	var (
 		ktab    *keytab.Keytab
@@ -140,13 +150,15 @@ func Run(ktPath, principal, realm, cfgPath, ldapAddr, dcHost string) error {
 		ktab, loadErr = kt.Load(ktPath)
 	}
 
-	if ktab == nil {
+	if ktab == nil || loadErr != nil {
 		ktab = keytab.New()
 	}
 
 	m := newModel(ktab, ktPath, principal, realm, cfgPath, ldapAddr, dcHost)
 
-	if loadErr != nil {
+	if errors.Is(loadErr, fs.ErrNotExist) {
+		m.status = newKeytabStatus(ktPath)
+	} else if loadErr != nil {
 		m.isErr = true
 		m.status = "could not open " + ktPath + ": " + loadErr.Error()
 		m.ktPath = ""
@@ -272,6 +284,28 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 
+	case negMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.isErr = true
+			m.status = "Negotiate token failed: " + msg.err.Error()
+
+			return m, nil
+		}
+
+		via, err := copyToClipboard("Negotiate " + msg.token)
+		if err != nil {
+			m.isErr = true
+			m.status = "copy failed: " + err.Error()
+
+			return m, nil
+		}
+
+		m.isErr = false
+		m.status = "Negotiate header value copied via " + via + " (one use, within about 5 minutes)"
+
+		return m, nil
+
 	case kvnoMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -358,6 +392,11 @@ func (m *model) newKeytab() {
 	m.status = "new empty keytab (ctrl+a to add an entry, ctrl+s to save)"
 }
 
+// newKeytabStatus is the status for a keytab path that does not exist yet.
+func newKeytabStatus(path string) string {
+	return "new keytab " + path + " (ctrl+a to add an entry, ctrl+s to create it)"
+}
+
 func (m *model) save() {
 	if len(m.ktab.Entries) == 0 {
 		m.isErr = true
@@ -421,8 +460,13 @@ func (m *model) applyPrompt(value string) {
 			return
 		}
 
+		status := "opened " + value
+
 		ktab, err := kt.Load(value)
-		if err != nil {
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			ktab, status = keytab.New(), newKeytabStatus(value)
+		case err != nil:
 			m.isErr = true
 			m.status = "open failed: " + err.Error()
 
@@ -437,7 +481,7 @@ func (m *model) applyPrompt(value string) {
 		m.mode = modeBrowse
 		m.prompt.Blur()
 		m.isErr = false
-		m.status = "opened " + value
+		m.status = status
 
 	case promptSaveAs:
 		if value == "" {
@@ -832,6 +876,8 @@ func (m *model) handleTestKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loginSelected()
 	case "enter":
 		return m, m.getServiceTicket()
+	case "ctrl+y":
+		return m, m.copyNegotiate()
 	}
 
 	var cmd tea.Cmd
@@ -874,6 +920,40 @@ func (m *model) getServiceTicket() tea.Cmd {
 			},
 			func(r any) tea.Msg {
 				return svcMsg{err: fmt.Errorf("service ticket crashed (recovered panic): %v", r)}
+			},
+		)
+	}
+}
+
+// copyNegotiate makes a fresh Negotiate token for the service ticket got, and
+// copies "Negotiate <token>" (an Authorization header's value). Each press makes
+// a new one: a service accepts a token once.
+func (m *model) copyNegotiate() tea.Cmd {
+	if m.busy {
+		return nil
+	}
+
+	if !m.haveSvc || m.cl == nil {
+		m.isErr = true
+		m.status = "get a service ticket first (type an SPN + enter)"
+
+		return nil
+	}
+
+	m.busy = true
+	m.isErr = false
+	m.status = "making a Negotiate token..."
+
+	cl, spn := m.cl, m.svc.SName
+
+	return func() tea.Msg {
+		return safeMsg(
+			func() tea.Msg {
+				token, err := kt.NegotiateToken(cl, spn)
+				return negMsg{token: token, err: err}
+			},
+			func(r any) tea.Msg {
+				return negMsg{err: fmt.Errorf("Negotiate token crashed (recovered panic): %v", r)}
 			},
 		)
 	}
@@ -1050,7 +1130,7 @@ func (m *model) testView() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("ctrl+t: get TGT · type an SPN + enter: service ticket · esc: back"))
+	b.WriteString(dimStyle.Render("ctrl+t: get TGT · type an SPN + enter: service ticket · ctrl+y: copy Negotiate header · esc: back"))
 
 	return b.String()
 }

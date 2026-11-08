@@ -3,7 +3,7 @@ module sorins/ktman
 go 1.25.0
 
 require (
-	github.com/SorinS/krb5 v0.0.0-00010101000000-000000000000
+	github.com/SorinS/krb5 v0.3.0
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.4
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -38,5 +38,3 @@ require (
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 )
-
-replace github.com/SorinS/krb5 => ../krb5.git
