@@ -9,8 +9,12 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/go-krb5/x/encoding/asn1"
 	"github.com/SorinS/krb5/iana/etypeID"
+	"github.com/SorinS/krb5/iana/nametype"
 	"github.com/SorinS/krb5/keytab"
+	"github.com/SorinS/krb5/messages"
+	"github.com/SorinS/krb5/types"
 
 	"sorins/ktman/internal/kt"
 )
@@ -205,5 +209,47 @@ func TestOpenMissingKeytabCreatesOnSave(t *testing.T) {
 
 	if !m.isErr || m.ktPath != path {
 		t.Fatalf("open of a bad keytab: isErr=%v ktPath=%q", m.isErr, m.ktPath)
+	}
+}
+
+// ctrl+x on the test screen shows the service ticket decoded with the open
+// keytab's service key, scrolls, and esc goes back.
+func TestDecodeView(t *testing.T) {
+	k := testKeytab(t)
+	sname := types.NewPrincipalName(nametype.KRB_NT_PRINCIPAL, "HTTP/web")
+	now := time.Now().UTC()
+
+	tkt, skey, err := messages.NewTicket(types.NewPrincipalName(nametype.KRB_NT_PRINCIPAL, "alice"), "EXAMPLE.TEST", sname, "EXAMPLE.TEST",
+		asn1.BitString{Bytes: make([]byte, 4), BitLength: 32}, k, etypeID.AES256_CTS_HMAC_SHA1_96, 1, now, now, now.Add(time.Hour), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(k, "web.keytab", "", "", "/nonexistent/krb5.conf", "", "")
+	m.width, m.height = 120, 14
+	m.mode = modeTest
+	m.haveSvc = true
+	m.svc = kt.SvcInfo{SName: "HTTP/web", Realm: "EXAMPLE.TEST", Ticket: tkt, SessionKey: skey}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlX})
+
+	if m.mode != modeDecode {
+		t.Fatalf("ctrl+x: mode %v, status %q", m.mode, m.status)
+	}
+
+	if view := m.View(); !strings.Contains(view, "Service ticket, decoded") || !strings.Contains(view, "realm:     EXAMPLE.TEST") {
+		t.Errorf("decode view:\n%s", view)
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+
+	if m.decodedTop == 0 || !strings.Contains(m.View(), "authorization-data: none") {
+		t.Errorf("end did not scroll to the decrypted part (top %d):\n%s", m.decodedTop, m.View())
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	if m.mode != modeTest {
+		t.Fatalf("esc: mode %v", m.mode)
 	}
 }

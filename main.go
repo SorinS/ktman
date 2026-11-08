@@ -6,7 +6,7 @@
 //
 //	ktman -k /etc/krb5.keytab -l
 //	echo $PW | ktman -n -k svc.keytab -p HTTP/svc.a.test -r A.TEST
-//	ktman -k svc.keytab -p HTTP/svc.a.test -r A.TEST -c krb5.conf -spn HTTP/host.a.test
+//	ktman -k svc.keytab -p HTTP/svc.a.test -r A.TEST -c krb5.conf -svc_ticket -spn HTTP/host.a.test
 //	ktman -ui
 package main
 
@@ -35,16 +35,18 @@ func main() {
 		list      = flag.Bool("l", false, "list the keytab's entries and exit")
 		ui        = flag.Bool("ui", false, "start the terminal UI")
 		newKt     = flag.Bool("n", false, "create (or append to) the keytab: add an entry for -p@-r")
+		tgt       = flag.Bool("tgt", false, "get a TGT for -p (default: the keytab's first entry)")
 		principal = flag.String("p", "", "principal (default on login: the keytab's first entry)")
 		realm     = flag.String("r", "", "realm (default on login: the chosen entry's realm, else default_realm)")
 		cfgPath   = flag.String("c", "", "krb5.conf path (default: $KRB5_CONFIG, else "+kt.DefaultConfigPath+")")
-		spn       = flag.String("spn", "", "service to get a ticket for, format SERVICE/fqdn (implies a login)")
-		negotiate = flag.Bool("negotiate", false, "with -spn: also print an HTTP Authorization: Negotiate header for it")
-		decode    = flag.Bool("decode", false, "with -spn: show the ticket's fields; its encrypted part and PAC too if a keytab holds the service's key")
+		svcTicket = flag.Bool("svc_ticket", false, "get a TGT, then a service ticket for -spn")
+		spn       = flag.String("spn", "", "the service, SERVICE/fqdn, for -svc_ticket")
+		negotiate = flag.Bool("negotiate", false, "with -svc_ticket: also print an HTTP Authorization: Negotiate header for it")
+		decode    = flag.Bool("decode", false, "with -svc_ticket: show the ticket's fields; its encrypted part and PAC too if a keytab holds the service's key")
 		svcKtPath = flag.String("skt", "", "with -decode: a keytab holding the service's key, if -k does not")
 		showKeys  = flag.Bool("print_key", false, "with -decode: also print the session key's bytes (as klist -K)")
 		salt      = flag.String("salt", "", "create: explicit salt (AD salts differ from the default); empty for the default")
-		etypes    = flag.String("e", "", "create: encryption type (default aes256-cts-hmac-sha1-96); one per entry")
+		etypes    = flag.String("e", "", "create: comma-separated encryption types (default aes256-cts-hmac-sha1-96,aes128-cts-hmac-sha1-96)")
 		kvno      = flag.Uint("kvno", 1, "create: the key version")
 		ldapAddr  = flag.String("ldap", "", "AD LDAP address HOST:PORT, for the TUI's Get-KVNO-from-AD (ctrl+k)")
 		dcHost    = flag.String("dc", "", "AD DC host name (ldap/<host>), paired with -ldap")
@@ -58,6 +60,11 @@ func main() {
 
 	flag.Usage = usage
 	flag.Parse()
+
+	if err := checkFlags(); err != nil {
+		fmt.Fprintf(os.Stderr, "ktman: %v\n", err)
+		os.Exit(2)
+	}
 
 	var err error
 	if *ktPath, err = kt.ResolveKeytabPath(*ktPath); err != nil {
@@ -81,7 +88,7 @@ func main() {
 	// The TUI does not require a keytab: with none it opens a create-or-open
 	// screen. This must come before the -k requirement check below.
 	if *ui {
-		if err := tui.Run(*ktPath, *principal, *realm, *cfgPath, *ldapAddr, *dcHost); err != nil {
+		if err := tui.Run(*ktPath, *principal, *realm, *cfgPath, *ldapAddr, *dcHost, *svcKtPath, *showKeys); err != nil {
 			fatal("%v", err)
 		}
 
@@ -109,14 +116,10 @@ func main() {
 		fatal("could not load keytab %q: %v", *ktPath, err)
 	}
 
-	// A bare list (or no action requested) needs no config and no KDC.
-	if *list || (*principal == "" && *spn == "") {
+	// A list (or no action requested) needs no config and no KDC.
+	if *list || !*tgt && !*svcTicket {
 		listKeytab(ktab)
 		return
-	}
-
-	if (*negotiate || *decode) && *spn == "" {
-		fatal("-negotiate and -decode need -spn")
 	}
 
 	var svcKt *keytab.Keytab
@@ -133,6 +136,93 @@ func main() {
 	}
 }
 
+// flagAliases maps each long alias to the flag it stands for.
+var flagAliases = map[string]string{"new": "n", "keytab": "k", "principal": "p", "realm": "r", "config": "c"}
+
+// checkFlags refuses combinations ktman would otherwise act on silently: more
+// than one action (-l, -n, -tgt or -spn, -ui), and an option given without the
+// action it belongs to. -tgt and -svc_ticket may be given together (a service
+// ticket needs the TGT anyway).
+func checkFlags() error {
+	set := map[string]bool{}
+
+	flag.Visit(func(f *flag.Flag) {
+		name := f.Name
+		if a, ok := flagAliases[name]; ok {
+			name = a
+		}
+
+		set[name] = true
+	})
+
+	var actions []string
+
+	for _, a := range []string{"l", "n", "ui"} {
+		if set[a] {
+			actions = append(actions, "-"+a)
+		}
+	}
+
+	if set["tgt"] || set["svc_ticket"] {
+		actions = append(actions, "-tgt/-svc_ticket")
+	}
+
+	if len(actions) > 1 {
+		return fmt.Errorf("%s: choose one", strings.Join(actions, ", "))
+	}
+
+	// option, the actions it belongs to (any of), and how to say them.
+	needs := []struct {
+		opt  string
+		with []string
+		say  string
+	}{
+		{"salt", []string{"n"}, "-n"},
+		{"e", []string{"n"}, "-n"},
+		{"kvno", []string{"n"}, "-n"},
+		{"spn", []string{"svc_ticket"}, "-svc_ticket"},
+		{"negotiate", []string{"svc_ticket"}, "-svc_ticket"},
+		{"decode", []string{"svc_ticket"}, "-svc_ticket"},
+		{"skt", []string{"decode", "ui"}, "-decode or -ui"},
+		{"print_key", []string{"decode", "ui"}, "-decode or -ui"},
+		{"ldap", []string{"ui"}, "-ui"},
+		{"dc", []string{"ui"}, "-ui"},
+	}
+
+	for _, n := range needs {
+		if !set[n.opt] {
+			continue
+		}
+
+		ok := false
+		for _, w := range n.with {
+			ok = ok || set[w]
+		}
+
+		if !ok {
+			return fmt.Errorf("-%s needs %s", n.opt, n.say)
+		}
+	}
+
+	if set["svc_ticket"] && !set["spn"] {
+		return errors.New("-svc_ticket needs -spn SERVICE/fqdn")
+	}
+
+	if (set["p"] || set["r"] || set["c"]) && len(actions) == 0 {
+		return errors.New("-p, -r and -c need an action: -tgt to log in, -svc_ticket for a service ticket, -n to create, or -ui")
+	}
+
+	if set["c"] && (set["l"] || set["n"]) {
+		return errors.New("-c is for -tgt, -svc_ticket and -ui (-l and -n need no KDC)")
+	}
+
+	if (set["p"] || set["r"]) && set["l"] {
+		return errors.New("-l lists every entry: -p and -r are not used")
+	}
+
+	return nil
+}
+
 // runCreate adds an entry for principal@realm to the keytab at ktPath, creating
 // the file or appending to an existing one. The password is read securely.
 func runCreate(ktPath, principal, realm, salt, etypes string, kvno uint32) error {
@@ -141,15 +231,15 @@ func runCreate(ktPath, principal, realm, salt, etypes string, kvno uint32) error
 		return fmt.Errorf("create needs a principal and realm (-p NAME -r REALM)")
 	}
 
-	et := kt.SupportedETypes[0]
+	ets, err := kt.ParseETypes(etypes)
+	if err != nil {
+		return err
+	}
 
-	if strings.TrimSpace(etypes) != "" {
-		id, err := kt.ParseEType(etypes)
-		if err != nil {
-			return err
+	for _, e := range ets {
+		if kt.WeakEType(e) {
+			fmt.Fprintf(os.Stderr, "ktman: note: %s is deprecated (RFC 8429); use it only for services that need it\n", kt.EtypeName(e))
 		}
-
-		et = id
 	}
 
 	password, err := readPassword(fmt.Sprintf("Password for %s@%s: ", name, rlm))
@@ -164,7 +254,7 @@ func runCreate(ktPath, principal, realm, salt, etypes string, kvno uint32) error
 		Password:  password,
 		Salt:      salt,
 		KVNO:      kvno,
-		ETypes:    []int32{et},
+		ETypes:    ets,
 	})
 	if err != nil {
 		return fmt.Errorf("could not write keytab %q: %w", ktPath, err)
@@ -360,7 +450,9 @@ func usage() {
 Usage:
   ktman -k PATH [-l]
   ktman -n -k PATH -p PRINCIPAL -r REALM [-e ENCTYPES] [-kvno N] [-salt SALT]
-  ktman -k PATH -p PRINCIPAL [-r REALM] [-c krb5.conf] [-spn SERVICE/fqdn [-negotiate] [-decode [-skt PATH] [-print_key]]]
+  ktman -k PATH -tgt [-p PRINCIPAL] [-r REALM] [-c krb5.conf]
+  ktman -k PATH -svc_ticket -spn SERVICE/fqdn [-p PRINCIPAL] [-r REALM] [-c krb5.conf]
+        [-negotiate] [-decode [-skt PATH] [-print_key]]
   ktman -ui [-k PATH]
 
 Flags:
@@ -369,20 +461,29 @@ Flags:
   -n, -new              create/append: add an entry for -p@-r to the keytab
   -ui                   start the terminal UI (no -k needed; a -k that does not
                         exist yet starts a new keytab, created on save)
-  -p, -principal NAME   principal (create: required; login: default first entry)
-  -r, -realm REALM      realm (create: required; login: default entry's realm)
+  -tgt                  get a TGT (login) for -p, by default the first entry
+  -svc_ticket           get a TGT, then a service ticket for -spn
+  -p, -principal NAME   principal (-n: required; -tgt/-svc_ticket: default first
+                        entry)
+  -r, -realm REALM      realm (-n: required; -tgt/-svc_ticket: default entry's
+                        realm)
   -c, -config PATH      krb5.conf (default: $KRB5_CONFIG, else /etc/krb5.conf;
                         none there: KDCs from DNS)
-  -spn SERVICE/fqdn     get a service ticket for this SPN after login
-  -negotiate            with -spn: also print an "Authorization: Negotiate"
+  -spn SERVICE/fqdn     with -svc_ticket: the service
+  -negotiate            with -svc_ticket: also print an "Authorization: Negotiate"
                         header for it (one use, within about 5 minutes)
-  -decode               with -spn: show the ticket field by field; its encrypted
+  -decode               with -svc_ticket: show the ticket field by field; its encrypted
                         part and PAC too when -skt or -k holds the service's key
-  -skt PATH             with -decode: keytab with the service's key
-  -print_key            with -decode: also print the session key's bytes
-  -e ENCTYPES           create: comma-separated enctypes (default aes256-cts,aes128-cts)
-  -kvno N               create: key version (default 1)
-  -salt SALT            create: explicit salt (empty for the default)
+  -skt PATH             with -decode (or -ui's ctrl+x): keytab with the
+                        service's key
+  -print_key            with -decode (or -ui's ctrl+x): also print the session
+                        key's bytes
+  -e ENCTYPES           with -n: comma-separated enctypes, one key each
+                        (default aes256-cts,aes128-cts, as MIT's ktadd;
+                        rc4-hmac and des3-cbc-sha1-kd on request)
+  -kvno N               with -n: key version (default 1)
+  -salt SALT            with -n: explicit salt (empty for the default; for an
+                        AD account: REALM + its sAMAccountName)
 
 Environment:
   KRB5_CONFIG           krb5.conf, when no -c (a list: the first that exists)
@@ -396,9 +497,10 @@ It is never taken from a flag.
 Examples:
   ktman -k /etc/krb5.keytab -l
   echo s3cret | ktman -n -k svc.keytab -p HTTP/svc.a.test -r A.TEST
-  ktman -n -k svc.keytab -p host/svc.a.test -r A.TEST -e aes256-cts,rc4-hmac -kvno 3
-  ktman -k svc.keytab -p HTTP/svc.a.test -r A.TEST -c krb5.conf -spn host/svc.a.test
-  curl -H "$(ktman -k u.keytab -p alice -r A.TEST -spn HTTP/web.a.test -negotiate | tail -1)" https://web.a.test/
+  ktman -n -k svc.keytab -p host/svc.a.test -r A.TEST -e aes256-cts,camellia256-cts-cmac -kvno 3
+  ktman -k svc.keytab -tgt -c krb5.conf
+  ktman -k svc.keytab -p HTTP/svc.a.test -r A.TEST -c krb5.conf -svc_ticket -spn host/svc.a.test
+  curl -H "$(ktman -k u.keytab -p alice -r A.TEST -svc_ticket -spn HTTP/web.a.test -negotiate | tail -1)" https://web.a.test/
   ktman -ui
 `)
 }

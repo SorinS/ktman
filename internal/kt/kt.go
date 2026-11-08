@@ -60,9 +60,9 @@ func ETypeLabel(id int32) string {
 	return fmt.Sprintf("%d %s", id, EtypeName(id))
 }
 
-// SupportedETypes are the encryption types ktman offers for new keytab entries,
-// strongest first. The deprecated single-DES, triple-DES and RC4 types are left
-// out on purpose.
+// SupportedETypes are the encryption types ktman offers for new keytab entries:
+// every one the library implements, strongest first. The weak ones (see
+// WeakEType) come last and are never a default; single DES is not implemented.
 var SupportedETypes = []int32{
 	etypeID.AES256_CTS_HMAC_SHA1_96,
 	etypeID.AES128_CTS_HMAC_SHA1_96,
@@ -70,6 +70,14 @@ var SupportedETypes = []int32{
 	etypeID.AES128_CTS_HMAC_SHA256_128,
 	etypeID.CAMELLIA256_CTS_CMAC,
 	etypeID.CAMELLIA128_CTS_CMAC,
+	etypeID.RC4_HMAC,
+	etypeID.DES3_CBC_SHA1_KD,
+}
+
+// WeakEType is whether id is deprecated (RFC 8429: RC4-HMAC and triple DES).
+// ktman makes such keys when asked to, for old services, but says so.
+func WeakEType(id int32) bool {
+	return id == etypeID.RC4_HMAC || id == etypeID.DES3_CBC_SHA1_KD
 }
 
 // ticketFlagNames pairs each ticket-flag bit with its name, in bit order.

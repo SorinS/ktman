@@ -22,7 +22,10 @@ directory.
 
 ```
 ktman -k PATH [-l]
-ktman -k PATH -p PRINCIPAL [-r REALM] [-c krb5.conf] [-spn SERVICE/fqdn]
+ktman -n -k PATH -p PRINCIPAL -r REALM [-e ENCTYPES] [-kvno N] [-salt SALT]
+ktman -k PATH -tgt [-p PRINCIPAL] [-r REALM] [-c krb5.conf]
+ktman -k PATH -svc_ticket -spn SERVICE/fqdn [-p PRINCIPAL] [-r REALM] [-c krb5.conf]
+      [-negotiate] [-decode [-skt PATH] [-print_key]]
 ktman -k PATH -ui
 ```
 
@@ -32,17 +35,26 @@ ktman -k PATH -ui
 | --------------------- | ------------------------------------------------------------------- |
 | `-k`, `-keytab PATH`  | keytab file (default: `$KRB5_KTNAME`; **required** unless `-ui`)    |
 | `-l`                  | list the keytab's entries and exit (no KDC or config needed)        |
+| `-n`, `-new`          | add an entry for `-p`@`-r` to the keytab, creating it if need be (the password is prompted for, or read from stdin) |
+| `-tgt`                | get a TGT (log in) from the keytab                                  |
+| `-svc_ticket`         | get a TGT, then a service ticket for `-spn`                         |
 | `-ui`                 | start the terminal UI (a `-k` that does not exist yet starts a new keytab, created there on save) |
-| `-p`, `-principal`    | principal to log in as (default: the keytab's **first** entry)      |
-| `-r`, `-realm`        | realm (default: the chosen entry's realm, else `default_realm`)     |
+| `-p`, `-principal`    | `-n`: the principal (required); `-tgt`/`-svc_ticket`: who to log in as (default: the keytab's **first** entry) |
+| `-r`, `-realm`        | `-n`: the realm (required); `-tgt`/`-svc_ticket`: default the chosen entry's realm, else `default_realm` |
+| `-e ENCTYPES`         | with `-n`: comma-separated enctypes, one key each (default `aes256-cts,aes128-cts`, as MIT's `ktadd`; the deprecated `rc4-hmac` and `des3-cbc-sha1-kd` are made on request, with a warning; single DES is not implemented) |
+| `-kvno N`             | with `-n`: the key version (default 1; for AD, the account's `msDS-KeyVersionNumber`) |
+| `-salt SALT`          | with `-n`: explicit salt (for an AD account: the realm and its sAMAccountName, e.g. `EXAMPLE.TESTsvc-web`) |
 | `-c`, `-config PATH`  | `krb5.conf` path (default: `$KRB5_CONFIG`, else `/etc/krb5.conf`)   |
-| `-spn SERVICE/fqdn`   | after login, get a service ticket for this SPN                      |
-| `-negotiate`          | with `-spn`: also print an `Authorization: Negotiate` header for it |
-| `-decode`             | with `-spn`: show the ticket field by field (its encrypted part and PAC too, given the service's key) |
+| `-spn SERVICE/fqdn`   | with `-svc_ticket`: the service                                     |
+| `-negotiate`          | with `-svc_ticket`: also print an `Authorization: Negotiate` header for it |
+| `-decode`             | with `-svc_ticket`: show the ticket field by field (its encrypted part and PAC too, given the service's key) |
 | `-skt PATH`           | with `-decode`: a keytab holding the service's key, if `-k` does not |
 | `-print_key`          | with `-decode`: also print the session key's bytes (as `klist -K`) |
 
-With no action flag and no `-p`/`-spn`, ktman lists the keytab (same as `-l`).
+The actions are `-l`, `-n`, `-tgt` (or `-svc_ticket`) and `-ui`, one at a time; with
+none, ktman lists the keytab (same as `-l`). An option given without its action
+(`-p` alone, `-salt` without `-n`, `-spn` without `-svc_ticket`, ...) is an error
+rather than ignored.
 
 The standard Kerberos environment variables fill in for missing flags:
 
@@ -76,7 +88,7 @@ host/svc.a.test@A.TEST  2     2026-11-05 23:25:07  aes256-cts-hmac-sha1-96
 **Get a TGT from the keytab:**
 
 ```sh
-ktman -k svc.keytab -p HTTP/svc.a.test -r A.TEST -c krb5.conf
+ktman -k svc.keytab -tgt -p HTTP/svc.a.test -r A.TEST -c krb5.conf
 ```
 
 ```
@@ -88,7 +100,7 @@ TGT OK: HTTP/svc.a.test@A.TEST -> krbtgt/A.TEST@A.TEST
 **Get a service ticket** for an SPN (`SERVICE/fqdn`) after the TGT:
 
 ```sh
-ktman -k svc.keytab -p HTTP/svc.a.test -r A.TEST -c krb5.conf -spn host/svc.a.test
+ktman -k svc.keytab -p HTTP/svc.a.test -r A.TEST -c krb5.conf -svc_ticket -spn host/svc.a.test
 ```
 
 ```
@@ -105,7 +117,7 @@ replay cache), within its clock skew (about five minutes), so make a new one
 per request.
 
 ```sh
-curl -H "$(ktman -k u.keytab -p alice -r A.TEST -c krb5.conf -spn HTTP/web.a.test -negotiate | tail -1)" https://web.a.test/
+curl -H "$(ktman -k u.keytab -p alice -r A.TEST -c krb5.conf -svc_ticket -spn HTTP/web.a.test -negotiate | tail -1)" https://web.a.test/
 ```
 
 **Decode the service ticket** with `-decode`. The ticket's outer part (realm,
@@ -120,7 +132,7 @@ that key; its KDC signature cannot be (that needs the krbtgt key). The session
 key is shown as its type and length; `-print_key` prints its bytes too.
 
 ```sh
-ktman -k u.keytab -p alice -r A.TEST -c krb5.conf -spn HTTP/web.a.test -decode -skt web.keytab
+ktman -k u.keytab -p alice -r A.TEST -c krb5.conf -svc_ticket -spn HTTP/web.a.test -decode -skt web.keytab
 ```
 
 **Terminal UI:**
@@ -139,6 +151,10 @@ In the UI:
 - `Ctrl+Y` after a service ticket — copy a fresh `Negotiate <token>` (an
   `Authorization` header's value) to the clipboard (pbcopy, wl-copy, xclip or
   xsel, else the terminal's OSC 52)
+- `Ctrl+X` after a service ticket — show it decoded, as `-decode` does (with the
+  open keytab and `-skt`'s for the service's key; `-print_key` applies too);
+  scroll with the arrows, `PgUp`/`PgDn`, `Home`/`End`, `Ctrl+Y` copies it, `Esc`
+  goes back
 - `Esc` — return focus to the list
 - `q` (on the list) or `Ctrl+C` — quit
 

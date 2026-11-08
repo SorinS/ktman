@@ -30,6 +30,7 @@ const (
 	modeForm        // add or edit an entry
 	modePrompt      // a one-line prompt (open / save-as / clone kvno)
 	modeTest        // get a TGT and a service ticket for an entry
+	modeDecode      // the service ticket, decoded (scrollable)
 )
 
 // the entry form's fields, in order.
@@ -93,7 +94,7 @@ type model struct {
 	formFocus int
 	formEdit  bool
 	formIndex int
-	etypeIdx  int // index into kt.SupportedETypes, the form's enctype dropdown
+	etypeIdx  int // index into kt.ETypeChoices(), the form's enctype dropdown
 
 	// one-line prompt
 	prompt      textinput.Model
@@ -108,6 +109,12 @@ type model struct {
 	testEntry int
 	haveSvc   bool
 	svc       kt.SvcInfo
+
+	// decode: the service ticket decoded, with the keytab open plus svcKt (-skt)
+	svcKt      *keytab.Keytab
+	showKeys   bool // -print_key: the session key's bytes too
+	decoded    []string
+	decodedTop int
 
 	busy   bool
 	status string
@@ -140,7 +147,10 @@ type kvnoMsg struct {
 // not exist yet starts an empty keytab that ctrl+s creates there; one that will
 // not open starts an empty, unnamed keytab with the reason shown (it is not
 // written over).
-func Run(ktPath, principal, realm, cfgPath, ldapAddr, dcHost string) error {
+//
+// svcKtPath (-skt) names a keytab holding service keys for ctrl+x (decode),
+// besides the one open; showKeys (-print_key) shows the session key's bytes.
+func Run(ktPath, principal, realm, cfgPath, ldapAddr, dcHost, svcKtPath string, showKeys bool) error {
 	var (
 		ktab    *keytab.Keytab
 		loadErr error
@@ -155,6 +165,16 @@ func Run(ktPath, principal, realm, cfgPath, ldapAddr, dcHost string) error {
 	}
 
 	m := newModel(ktab, ktPath, principal, realm, cfgPath, ldapAddr, dcHost)
+	m.showKeys = showKeys
+
+	if svcKtPath != "" {
+		svcKt, err := kt.Load(svcKtPath)
+		if err != nil {
+			return fmt.Errorf("could not load the service keytab %q: %w", svcKtPath, err)
+		}
+
+		m.svcKt = svcKt
+	}
 
 	if errors.Is(loadErr, fs.ErrNotExist) {
 		m.status = newKeytabStatus(ktPath)
@@ -192,7 +212,7 @@ func newModel(ktab *keytab.Keytab, ktPath, principal, realm, cfgPath, ldapAddr, 
 	m.form[fPrincipal] = mkInput("principal: ", "SERVICE/host or a user name", 256, false)
 	m.form[fRealm] = mkInput("realm:     ", "REALM", 128, false)
 	m.form[fRealm].SetValue(realm)
-	m.form[fETypes] = mkInput("enctypes:  ", "blank = aes256-cts, aes128-cts", 256, false)
+	m.form[fETypes] = mkInput("enctypes:  ", "", 256, false) // shown as a dropdown
 	m.form[fKVNO] = mkInput("kvno:      ", "1", 9, false)
 	m.form[fPassword] = mkInput("password:  ", "", 256, true)
 
@@ -337,6 +357,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePromptKey(msg)
 	case modeTest:
 		return m.handleTestKey(msg)
+	case modeDecode:
+		return m.handleDecodeKey(msg)
 	default:
 		return m.handleBrowseKey(msg)
 	}
@@ -587,11 +609,13 @@ func (m *model) handleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// The enctype field is a dropdown: left/right (or space) cycle it.
 	if m.formFocus == fETypes {
+		n := len(kt.ETypeChoices())
+
 		switch msg.String() {
 		case "left", "h":
-			m.etypeIdx = (m.etypeIdx - 1 + len(kt.SupportedETypes)) % len(kt.SupportedETypes)
+			m.etypeIdx = (m.etypeIdx - 1 + n) % n
 		case "right", "l", " ":
-			m.etypeIdx = (m.etypeIdx + 1) % len(kt.SupportedETypes)
+			m.etypeIdx = (m.etypeIdx + 1) % n
 		}
 
 		return m, nil
@@ -624,7 +648,7 @@ func (m *model) commitForm() {
 		return
 	}
 
-	etype := kt.SupportedETypes[m.etypeIdx]
+	etypes := kt.ETypeChoices()[m.etypeIdx]
 
 	kvno := uint32(1)
 	if v := strings.TrimSpace(m.form[fKVNO].Value()); v != "" {
@@ -644,12 +668,16 @@ func (m *model) commitForm() {
 		m.ktab.Entries = append(m.ktab.Entries[:m.formIndex], m.ktab.Entries[m.formIndex+1:]...)
 	}
 
-	if err := m.ktab.AddEntryWithSalt(name, realm, password, "", time.Now(), kvno, etype); err != nil {
-		m.isErr = true
-		m.status = "add " + kt.EtypeName(etype) + ": " + err.Error()
-		m.refresh()
+	now := time.Now()
 
-		return
+	for _, etype := range etypes {
+		if err := m.ktab.AddEntryWithSalt(name, realm, password, "", now, kvno, etype); err != nil {
+			m.isErr = true
+			m.status = "add " + kt.EtypeName(etype) + ": " + err.Error()
+			m.refresh()
+
+			return
+		}
 	}
 
 	m.dirty = true
@@ -659,9 +687,9 @@ func (m *model) commitForm() {
 	m.isErr = false
 
 	if m.formEdit {
-		m.status = "entry replaced (" + kt.EtypeName(etype) + ") — ctrl+s to save"
+		m.status = "entry replaced (" + kt.ETypesLabel(etypes) + ") — ctrl+s to save"
 	} else {
-		m.status = fmt.Sprintf("added %s for %s@%s — ctrl+s to save", kt.EtypeName(etype), name, realm)
+		m.status = fmt.Sprintf("added %s for %s@%s — ctrl+s to save", kt.ETypesLabel(etypes), name, realm)
 	}
 }
 
@@ -878,6 +906,9 @@ func (m *model) handleTestKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.getServiceTicket()
 	case "ctrl+y":
 		return m, m.copyNegotiate()
+	case "ctrl+x":
+		m.startDecode()
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -959,6 +990,98 @@ func (m *model) copyNegotiate() tea.Cmd {
 	}
 }
 
+// startDecode shows the service ticket decoded, as -decode prints it, with the
+// open keytab and -skt's for the service's key.
+func (m *model) startDecode() {
+	if !m.haveSvc {
+		m.isErr = true
+		m.status = "get a service ticket first (type an SPN + enter)"
+
+		return
+	}
+
+	var b strings.Builder
+
+	kt.DecodeTicket(&b, m.svc, m.showKeys, m.svcKt, m.ktab)
+
+	m.decoded = strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	m.decodedTop = 0
+	m.mode = modeDecode
+	m.spnInput.Blur()
+	m.isErr = false
+	m.status = "decoded " + m.svc.SName + "@" + m.svc.Realm
+}
+
+// decodeRows is how many decoded lines fit in the pane.
+func (m *model) decodeRows() int {
+	h := m.height
+	if h < 12 {
+		h = 28
+	}
+
+	if r := h - 5 - 4; r > 3 {
+		return r
+	}
+
+	return 3
+}
+
+func (m *model) handleDecodeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	page := m.decodeRows()
+	last := len(m.decoded) - page
+
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = modeTest
+		m.spnInput.Focus()
+
+		return m, nil
+	case "up", "k":
+		m.decodedTop--
+	case "down", "j":
+		m.decodedTop++
+	case "pgup", "b":
+		m.decodedTop -= page
+	case "pgdown", " ", "f":
+		m.decodedTop += page
+	case "home", "g":
+		m.decodedTop = 0
+	case "end", "G":
+		m.decodedTop = last
+	case "ctrl+y":
+		via, err := copyToClipboard(strings.Join(m.decoded, "\n") + "\n")
+		if err != nil {
+			m.isErr = true
+			m.status = "copy failed: " + err.Error()
+
+			return m, nil
+		}
+
+		m.isErr = false
+		m.status = "decoded ticket copied via " + via
+	}
+
+	m.decodedTop = max(0, min(m.decodedTop, last))
+
+	return m, nil
+}
+
+func (m *model) decodeView() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("Service ticket, decoded"))
+	b.WriteString("\n\n")
+
+	end := min(m.decodedTop+m.decodeRows(), len(m.decoded))
+	b.WriteString(strings.Join(m.decoded[m.decodedTop:end], "\n"))
+	b.WriteString("\n\n")
+
+	pos := fmt.Sprintf("lines %d-%d of %d", m.decodedTop+1, end, len(m.decoded))
+	b.WriteString(dimStyle.Render(pos + " · ↑↓ pgup pgdn home end: scroll · ctrl+y: copy · esc: back"))
+
+	return b.String()
+}
+
 // ---- rendering ----
 
 func (m *model) View() string {
@@ -1021,6 +1144,8 @@ func (m *model) leftContent(w int) string {
 		return m.promptView()
 	case modeTest:
 		return m.testView()
+	case modeDecode:
+		return m.decodeView()
 	default:
 		return m.tableView(w)
 	}
@@ -1075,7 +1200,14 @@ func (m *model) formView() string {
 		}
 
 		if i == fETypes {
-			b.WriteString(marker + "enctype:   " + kt.ETypeLabel(kt.SupportedETypes[m.etypeIdx]) + dimStyle.Render("   ‹ › to change"))
+			choice := kt.ETypeChoices()[m.etypeIdx]
+
+			label := kt.ETypesLabel(choice)
+			if len(choice) == 1 && kt.WeakEType(choice[0]) {
+				label += errStyle.Render("  (deprecated, for old services only)")
+			}
+
+			b.WriteString(marker + "enctypes:  " + label + dimStyle.Render("   ‹ › to change"))
 			b.WriteString("\n")
 
 			continue
@@ -1130,7 +1262,7 @@ func (m *model) testView() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("ctrl+t: get TGT · type an SPN + enter: service ticket · ctrl+y: copy Negotiate header · esc: back"))
+	b.WriteString(dimStyle.Render("ctrl+t: get TGT · type an SPN + enter: service ticket · ctrl+y: copy Negotiate header · ctrl+x: decode ticket · esc: back"))
 
 	return b.String()
 }
@@ -1216,11 +1348,12 @@ func (m *model) chipsView() string {
 	return " " + strings.Join(parts, "  ")
 }
 
-// etypeIndex is the position of an encryption-type ID in kt.SupportedETypes, or
-// 0 when it is not one we offer (an old entry's type, say).
+// etypeIndex is the position in kt.ETypeChoices() of the choice of id alone
+// (an edit replaces one entry), or 0, the default pair, when id is not one we
+// offer (an old entry's type, say).
 func etypeIndex(id int32) int {
-	for i, e := range kt.SupportedETypes {
-		if e == id {
+	for i, c := range kt.ETypeChoices() {
+		if len(c) == 1 && c[0] == id {
 			return i
 		}
 	}

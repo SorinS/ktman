@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,22 +35,61 @@ func NormalizePrincipal(principal, realm string) (string, string) {
 	return principal, realm
 }
 
-// ParseEType maps a single encryption-type name to its ID, accepting the
-// library's names and aliases, and rejects types ktman does not offer (single
-// DES, triple DES and RC4). One enctype per entry: to add another, run again.
-func ParseEType(name string) (int32, error) {
-	id := etypeID.EtypeSupported(strings.TrimSpace(name))
-	if id == 0 {
-		return 0, fmt.Errorf("unknown enctype %q", name)
+// ETypeChoices are the enctype sets the TUI's add form offers: the default
+// pair first, then each supported type alone.
+func ETypeChoices() [][]int32 {
+	c := [][]int32{DefaultCreateETypes}
+	for _, e := range SupportedETypes {
+		c = append(c, []int32{e})
 	}
 
-	for _, s := range SupportedETypes {
-		if s == id {
-			return id, nil
+	return c
+}
+
+// ETypesLabel names a set of enctypes, "aes256-cts-hmac-sha1-96 +
+// aes128-cts-hmac-sha1-96" for the default pair.
+func ETypesLabel(ids []int32) string {
+	names := make([]string, len(ids))
+	for i, id := range ids {
+		names[i] = EtypeName(id)
+	}
+
+	return strings.Join(names, " + ")
+}
+
+// ParseETypes maps a comma-separated list of encryption-type names to their
+// IDs, in order and without repeats; an empty list is DefaultCreateETypes.
+func ParseETypes(list string) ([]int32, error) {
+	if strings.TrimSpace(list) == "" {
+		return DefaultCreateETypes, nil
+	}
+
+	var ids []int32
+
+	for _, name := range strings.Split(list, ",") {
+		id, err := ParseEType(name)
+		if err != nil {
+			return nil, err
+		}
+
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
 		}
 	}
 
-	return 0, fmt.Errorf("enctype %q is not supported (single DES, triple DES and RC4 are excluded)", name)
+	return ids, nil
+}
+
+// ParseEType maps a single encryption-type name to its ID, accepting the
+// library's names and aliases. A type the library does not implement (single
+// DES, say) is an error.
+func ParseEType(name string) (int32, error) {
+	id := etypeID.EtypeSupported(strings.TrimSpace(name))
+	if id == 0 || !slices.Contains(SupportedETypes, id) {
+		return 0, fmt.Errorf("enctype %q is unknown or not implemented", strings.TrimSpace(name))
+	}
+
+	return id, nil
 }
 
 // CreateOptions describes an entry to add to a keytab.
